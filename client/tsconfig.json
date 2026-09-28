@@ -1,14 +1,15 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2022"],
-    "types": ["bun-types"],
-    "outDir": "./dist",
-    "rootDir": ".",
-    "tsBuildInfoFile": "./.tsbuildinfo.server",
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
+    "types": ["bun-types", "react", "react-dom"],
+    "rootDir": "..",
+    "tsBuildInfoFile": "./.tsbuildinfo.client",
     "paths": {
-      "@space/privileged": ["./.generated/privileged.contract"]
+      "@space/server/*": ["../server/src/*"],
+      "@space/privileged": ["../server/.generated/privileged.contract"]
     }
   },
-  "include": ["src/**/*", ".generated/**/*"]
+  "include": ["src/**/*", "../server/src/**/*"]
 }
