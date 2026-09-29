@@ -16,8 +16,29 @@ const photoShape = z.object({
   url: z.string(),
   filename: z.string(),
   note: z.string(),
+  unit_name: z.string(),
+  location_text: z.string(),
+  photographer: z.string(),
   captured_at: z.string(),
   created_at: z.string(),
+});
+
+const assignmentShape = z.object({
+  token: z.string(),
+  folder_id: z.number(),
+  folder_name: z.string(),
+  unit_name: z.string(),
+  location_text: z.string(),
+  photographer: z.string(),
+  active: z.boolean(),
+  created_at: z.string(),
+});
+
+const assignmentPublicShape = z.object({
+  token: z.string(),
+  unit_name: z.string(),
+  location_text: z.string(),
+  photographer: z.string(),
 });
 
 function principalKey(viewer: Viewer): string {
@@ -58,14 +79,14 @@ function folderAccess(accountKey: string, allowLegacy: boolean) {
     : eq(schema.folders.ownerKey, accountKey);
 }
 
+function photoExtension(mimeType: "image/jpeg" | "image/png" | "image/webp") {
+  return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+}
+
 export const Actions = {
   getSession: defineAction({
     request: z.object({}),
-    response: z.object({
-      authenticated: z.boolean(),
-      linked: z.boolean(),
-      can_create_code: z.boolean(),
-    }),
+    response: z.object({ authenticated: z.boolean(), linked: z.boolean(), can_create_code: z.boolean() }),
     async handler(ctx) {
       const account = await getAccount(ctx);
       return {
@@ -85,12 +106,7 @@ export const Actions = {
       const token = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
       const expiresAt = new Date(Date.now() + 5 * 60_000);
       const db = ctx.db<typeof schema>();
-      await db.insert(schema.pairingSessions).values({
-        token,
-        accountKey: account.accountKey,
-        createdBy: account.viewerKey,
-        expiresAt,
-      });
+      await db.insert(schema.pairingSessions).values({ token, accountKey: account.accountKey, createdBy: account.viewerKey, expiresAt });
       return { token, expires_at: expiresAt.toISOString() };
     },
   }),
@@ -104,27 +120,16 @@ export const Actions = {
       const claimed = await db
         .update(schema.pairingSessions)
         .set({ consumedAt: new Date() })
-        .where(and(
-          eq(schema.pairingSessions.token, args.token),
-          isNull(schema.pairingSessions.consumedAt),
-          gt(schema.pairingSessions.expiresAt, new Date()),
-        ))
+        .where(and(eq(schema.pairingSessions.token, args.token), isNull(schema.pairingSessions.consumedAt), gt(schema.pairingSessions.expiresAt, new Date())))
         .returning({ accountKey: schema.pairingSessions.accountKey });
       const pair = claimed[0];
       if (!pair) throw new Error("登录码无效、已使用或已过期");
       if (pair.accountKey === account.viewerKey) {
         await db.delete(schema.deviceLinks).where(eq(schema.deviceLinks.viewerKey, account.viewerKey));
       } else {
-        const existing = await db
-          .select({ viewerKey: schema.deviceLinks.viewerKey })
-          .from(schema.deviceLinks)
-          .where(eq(schema.deviceLinks.viewerKey, account.viewerKey))
-          .limit(1);
+        const existing = await db.select({ viewerKey: schema.deviceLinks.viewerKey }).from(schema.deviceLinks).where(eq(schema.deviceLinks.viewerKey, account.viewerKey)).limit(1);
         if (existing[0]) {
-          await db
-            .update(schema.deviceLinks)
-            .set({ accountKey: pair.accountKey, linkedAt: new Date() })
-            .where(eq(schema.deviceLinks.viewerKey, account.viewerKey));
+          await db.update(schema.deviceLinks).set({ accountKey: pair.accountKey, linkedAt: new Date() }).where(eq(schema.deviceLinks.viewerKey, account.viewerKey));
         } else {
           await db.insert(schema.deviceLinks).values({ viewerKey: account.viewerKey, accountKey: pair.accountKey });
         }
@@ -156,22 +161,11 @@ export const Actions = {
       const access = folderAccess(account.accountKey, account.allowLegacy);
       const [folderRows, photoRows] = await Promise.all([
         db.select().from(schema.folders).where(access).orderBy(desc(schema.folders.id)),
-        db
-          .select({ folderId: schema.photos.folderId })
-          .from(schema.photos)
-          .innerJoin(schema.folders, eq(schema.photos.folderId, schema.folders.id))
-          .where(access),
+        db.select({ folderId: schema.photos.folderId }).from(schema.photos).innerJoin(schema.folders, eq(schema.photos.folderId, schema.folders.id)).where(access),
       ]);
       const counts = new Map<number, number>();
       for (const row of photoRows) counts.set(row.folderId, (counts.get(row.folderId) ?? 0) + 1);
-      return {
-        folders: folderRows.map((row) => ({
-          id: row.id,
-          name: row.name,
-          photo_count: counts.get(row.id) ?? 0,
-          created_at: row.createdAt.toISOString(),
-        })),
-      };
+      return { folders: folderRows.map((row) => ({ id: row.id, name: row.name, photo_count: counts.get(row.id) ?? 0, created_at: row.createdAt.toISOString() })) };
     },
   }),
 
@@ -181,10 +175,7 @@ export const Actions = {
     async handler(ctx, args) {
       const account = requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
-      const result = await db
-        .insert(schema.folders)
-        .values({ name: args.name.trim(), ownerKey: account.accountKey })
-        .returning({ id: schema.folders.id, name: schema.folders.name });
+      const result = await db.insert(schema.folders).values({ name: args.name.trim(), ownerKey: account.accountKey }).returning({ id: schema.folders.id, name: schema.folders.name });
       const row = result[0];
       if (!row) throw new Error("文件夹创建失败");
       ctx.invalidateQueries();
@@ -198,11 +189,7 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
-      const result = await db
-        .update(schema.folders)
-        .set({ name: args.name.trim(), ownerKey: account.accountKey })
-        .where(and(eq(schema.folders.id, args.id), folderAccess(account.accountKey, account.allowLegacy)))
-        .returning({ id: schema.folders.id });
+      const result = await db.update(schema.folders).set({ name: args.name.trim(), ownerKey: account.accountKey }).where(and(eq(schema.folders.id, args.id), folderAccess(account.accountKey, account.allowLegacy))).returning({ id: schema.folders.id });
       if (!result[0]) throw new Error("文件夹不存在或无权修改");
       ctx.invalidateQueries();
       return { ok: true };
@@ -217,11 +204,16 @@ export const Actions = {
       if (!account) return { photos: [] };
       const db = ctx.db<typeof schema>();
       const search = args.search.trim();
-      const conditions = [
-        folderAccess(account.accountKey, account.allowLegacy),
-        args.folderId ? eq(schema.photos.folderId, args.folderId) : undefined,
-        search ? like(schema.photos.note, `%${search}%`) : undefined,
-      ].filter((value): value is NonNullable<typeof value> => value !== undefined);
+      const searchFilter = search
+        ? or(
+            like(schema.photos.note, `%${search}%`),
+            like(schema.photos.unitName, `%${search}%`),
+            like(schema.photos.locationText, `%${search}%`),
+            like(schema.photos.photographer, `%${search}%`),
+          )
+        : undefined;
+      const conditions = [folderAccess(account.accountKey, account.allowLegacy), args.folderId ? eq(schema.photos.folderId, args.folderId) : undefined, searchFilter]
+        .filter((value): value is NonNullable<typeof value> => value !== undefined);
       const rows = await db
         .select({
           id: schema.photos.id,
@@ -230,6 +222,9 @@ export const Actions = {
           blobKey: schema.photos.blobKey,
           filename: schema.photos.filename,
           note: schema.photos.note,
+          unitName: schema.photos.unitName,
+          locationText: schema.photos.locationText,
+          photographer: schema.photos.photographer,
           capturedAt: schema.photos.capturedAt,
           createdAt: schema.photos.createdAt,
         })
@@ -245,6 +240,9 @@ export const Actions = {
           url: await ctx.blobs.getUrl(row.blobKey, { expiresInSeconds: 3600 }),
           filename: row.filename,
           note: row.note,
+          unit_name: row.unitName,
+          location_text: row.locationText,
+          photographer: row.photographer,
           captured_at: row.capturedAt.toISOString(),
           created_at: row.createdAt.toISOString(),
         }))),
@@ -265,23 +263,174 @@ export const Actions = {
     async handler(ctx, args) {
       const account = requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
-      const folder = await db
-        .select({ id: schema.folders.id })
-        .from(schema.folders)
-        .where(and(eq(schema.folders.id, args.folderId), folderAccess(account.accountKey, account.allowLegacy)))
-        .limit(1);
+      const folder = await db.select({ id: schema.folders.id }).from(schema.folders).where(and(eq(schema.folders.id, args.folderId), folderAccess(account.accountKey, account.allowLegacy))).limit(1);
       if (!folder[0]) throw new Error("所选文件夹不存在或无权访问");
-      const extension = args.mimeType === "image/png" ? "png" : args.mimeType === "image/webp" ? "webp" : "jpg";
-      const key = `photos/${account.accountKey}/${args.folderId}/${crypto.randomUUID()}.${extension}`;
+      const key = `photos/${account.accountKey}/${args.folderId}/${crypto.randomUUID()}.${photoExtension(args.mimeType)}`;
+      const bytes = Buffer.from(args.dataBase64, "base64");
+      if (bytes.byteLength > 12_000_000) throw new Error("照片不能超过 12MB");
+      await ctx.blobs.put(key, bytes, { contentType: args.mimeType });
+      try {
+        const result = await db.insert(schema.photos).values({ folderId: args.folderId, blobKey: key, filename: args.filename, note: args.note.trim(), capturedAt: new Date(args.capturedAt) }).returning({ id: schema.photos.id });
+        const row = result[0];
+        if (!row) throw new Error("照片保存失败");
+        ctx.invalidateQueries();
+        return { id: row.id };
+      } catch (error) {
+        await ctx.blobs.delete(key);
+        throw error;
+      }
+    },
+  }),
+
+  listCaptureAssignments: defineAction({
+    request: z.object({}),
+    response: z.object({ assignments: z.array(assignmentShape) }),
+    async handler(ctx) {
+      const account = await getAccount(ctx);
+      if (!account) return { assignments: [] };
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select({
+          token: schema.captureAssignments.token,
+          folderId: schema.captureAssignments.folderId,
+          folderName: schema.folders.name,
+          unitName: schema.captureAssignments.unitName,
+          locationText: schema.captureAssignments.locationText,
+          photographer: schema.captureAssignments.photographer,
+          active: schema.captureAssignments.active,
+          createdAt: schema.captureAssignments.createdAt,
+        })
+        .from(schema.captureAssignments)
+        .innerJoin(schema.folders, eq(schema.captureAssignments.folderId, schema.folders.id))
+        .where(eq(schema.captureAssignments.accountKey, account.accountKey))
+        .orderBy(desc(schema.captureAssignments.createdAt));
+      return { assignments: rows.map((row) => ({
+        token: row.token,
+        folder_id: row.folderId,
+        folder_name: row.folderName,
+        unit_name: row.unitName,
+        location_text: row.locationText,
+        photographer: row.photographer,
+        active: row.active,
+        created_at: row.createdAt.toISOString(),
+      })) };
+    },
+  }),
+
+  createCaptureAssignment: defineAction({
+    request: z.object({
+      folderId: z.number().int().positive(),
+      unitName: z.string().trim().min(1).max(80),
+      locationText: z.string().trim().min(1).max(100),
+      photographer: z.string().trim().min(1).max(40),
+    }),
+    response: assignmentShape,
+    async handler(ctx, args) {
+      const account = requireAccount(await getAccount(ctx));
+      const db = ctx.db<typeof schema>();
+      const folderRows = await db.select({ id: schema.folders.id, name: schema.folders.name }).from(schema.folders).where(and(eq(schema.folders.id, args.folderId), folderAccess(account.accountKey, account.allowLegacy))).limit(1);
+      const folder = folderRows[0];
+      if (!folder) throw new Error("所选文件夹不存在或无权访问");
+      const token = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
+      const createdAt = new Date();
+      await db.insert(schema.captureAssignments).values({
+        token,
+        folderId: folder.id,
+        accountKey: account.accountKey,
+        unitName: args.unitName.trim(),
+        locationText: args.locationText.trim(),
+        photographer: args.photographer.trim(),
+        createdAt,
+      });
+      ctx.invalidateQueries();
+      return {
+        token,
+        folder_id: folder.id,
+        folder_name: folder.name,
+        unit_name: args.unitName.trim(),
+        location_text: args.locationText.trim(),
+        photographer: args.photographer.trim(),
+        active: true,
+        created_at: createdAt.toISOString(),
+      };
+    },
+  }),
+
+  setCaptureAssignmentActive: defineAction({
+    request: z.object({ token: z.string().min(30).max(120), active: z.boolean() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = requireAccount(await getAccount(ctx));
+      const db = ctx.db<typeof schema>();
+      const updated = await db.update(schema.captureAssignments).set({ active: args.active }).where(and(eq(schema.captureAssignments.token, args.token), eq(schema.captureAssignments.accountKey, account.accountKey))).returning({ token: schema.captureAssignments.token });
+      if (!updated[0]) throw new Error("拍摄码不存在或无权修改");
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  inspectCaptureAssignment: defineAction({
+    request: z.object({ token: z.string().min(30).max(120) }),
+    response: assignmentPublicShape,
+    async handler(ctx, args) {
+      requireAccount(await getAccount(ctx));
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select({
+          token: schema.captureAssignments.token,
+          unitName: schema.captureAssignments.unitName,
+          locationText: schema.captureAssignments.locationText,
+          photographer: schema.captureAssignments.photographer,
+        })
+        .from(schema.captureAssignments)
+        .innerJoin(schema.folders, eq(schema.captureAssignments.folderId, schema.folders.id))
+        .where(and(eq(schema.captureAssignments.token, args.token), eq(schema.captureAssignments.active, true)))
+        .limit(1);
+      const row = rows[0];
+      if (!row) throw new Error("拍摄码无效或已停用");
+      return { token: row.token, unit_name: row.unitName, location_text: row.locationText, photographer: row.photographer };
+    },
+  }),
+
+  uploadCaptureAssignmentPhoto: defineAction({
+    request: z.object({
+      token: z.string().min(30).max(120),
+      dataBase64: z.string().min(20).max(18_000_000),
+      mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+      filename: z.string().min(1).max(100),
+      capturedAt: z.string().datetime(),
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      requireAccount(await getAccount(ctx));
+      const db = ctx.db<typeof schema>();
+      const assignments = await db
+        .select({
+          folderId: schema.captureAssignments.folderId,
+          accountKey: schema.captureAssignments.accountKey,
+          unitName: schema.captureAssignments.unitName,
+          locationText: schema.captureAssignments.locationText,
+          photographer: schema.captureAssignments.photographer,
+        })
+        .from(schema.captureAssignments)
+        .innerJoin(schema.folders, eq(schema.captureAssignments.folderId, schema.folders.id))
+        .where(and(eq(schema.captureAssignments.token, args.token), eq(schema.captureAssignments.active, true)))
+        .limit(1);
+      const assignment = assignments[0];
+      if (!assignment) throw new Error("拍摄码无效或已停用");
+      const key = `photos/${assignment.accountKey}/${assignment.folderId}/${crypto.randomUUID()}.${photoExtension(args.mimeType)}`;
       const bytes = Buffer.from(args.dataBase64, "base64");
       if (bytes.byteLength > 12_000_000) throw new Error("照片不能超过 12MB");
       await ctx.blobs.put(key, bytes, { contentType: args.mimeType });
       try {
         const result = await db.insert(schema.photos).values({
-          folderId: args.folderId,
+          folderId: assignment.folderId,
           blobKey: key,
           filename: args.filename,
-          note: args.note.trim(),
+          note: "扫码拍摄",
+          unitName: assignment.unitName,
+          locationText: assignment.locationText,
+          photographer: assignment.photographer,
           capturedAt: new Date(args.capturedAt),
         }).returning({ id: schema.photos.id });
         const row = result[0];
@@ -301,12 +450,7 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
-      const rows = await db
-        .select({ blobKey: schema.photos.blobKey })
-        .from(schema.photos)
-        .innerJoin(schema.folders, eq(schema.photos.folderId, schema.folders.id))
-        .where(and(eq(schema.photos.id, args.id), folderAccess(account.accountKey, account.allowLegacy)))
-        .limit(1);
+      const rows = await db.select({ blobKey: schema.photos.blobKey }).from(schema.photos).innerJoin(schema.folders, eq(schema.photos.folderId, schema.folders.id)).where(and(eq(schema.photos.id, args.id), folderAccess(account.accountKey, account.allowLegacy))).limit(1);
       const row = rows[0];
       if (!row) throw new Error("照片不存在或无权删除");
       await db.delete(schema.photos).where(eq(schema.photos.id, args.id));
@@ -322,17 +466,9 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
-      const folders = await db
-        .select({ id: schema.folders.id })
-        .from(schema.folders)
-        .where(and(eq(schema.folders.id, args.id), folderAccess(account.accountKey, account.allowLegacy)))
-        .limit(1);
-      if (!folders[0]) throw new Error("文件夹不存在或无权删除");
-      const photos = await db
-        .select({ blobKey: schema.photos.blobKey })
-        .from(schema.photos)
-        .where(eq(schema.photos.folderId, args.id))
-        .orderBy(asc(schema.photos.id));
+      const folderRows = await db.select({ id: schema.folders.id }).from(schema.folders).where(and(eq(schema.folders.id, args.id), folderAccess(account.accountKey, account.allowLegacy))).limit(1);
+      if (!folderRows[0]) throw new Error("文件夹不存在或无权删除");
+      const photos = await db.select({ blobKey: schema.photos.blobKey }).from(schema.photos).where(eq(schema.photos.folderId, args.id)).orderBy(asc(schema.photos.id));
       await db.delete(schema.photos).where(eq(schema.photos.folderId, args.id));
       await db.delete(schema.folders).where(eq(schema.folders.id, args.id));
       await Promise.all(photos.map((row) => ctx.blobs.delete(row.blobKey)));

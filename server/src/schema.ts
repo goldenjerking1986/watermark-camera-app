@@ -23,6 +23,9 @@ export const photos = sqliteTable(
     blobKey: text("blob_key").notNull(),
     filename: text("filename").notNull(),
     note: text("note").notNull().default(""),
+    unitName: text("unit_name").notNull().default(""),
+    locationText: text("location_text").notNull().default(""),
+    photographer: text("photographer").notNull().default(""),
     capturedAt: integer("captured_at", { mode: "timestamp_ms" }).notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
@@ -52,4 +55,26 @@ export const pairingSessions = sqliteTable(
     consumedAt: integer("consumed_at", { mode: "timestamp_ms" }),
   },
   (table) => [index("pairing_sessions_expires_at_idx").on(table.expiresAt)],
+);
+
+export const captureAssignments = sqliteTable(
+  "capture_assignments",
+  {
+    token: text("token").primaryKey(),
+    folderId: integer("folder_id")
+      .notNull()
+      .references(() => folders.id, { onDelete: "cascade" }),
+    accountKey: text("account_key").notNull(),
+    unitName: text("unit_name").notNull(),
+    locationText: text("location_text").notNull(),
+    photographer: text("photographer").notNull(),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("capture_assignments_account_key_idx").on(table.accountKey),
+    index("capture_assignments_folder_id_idx").on(table.folderId),
+  ],
 );
