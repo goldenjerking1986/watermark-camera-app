@@ -231,6 +231,29 @@ input::placeholder { color: color-mix(in srgb, var(--dim) 74%, transparent); }
 .folder-modal input { width: 100%; }
 .solid-button.wide { width: 100%; margin-top: 10px; }
 
+.public-layout { display: block; max-width: 560px; }
+.public-capture { min-height: min(700px, calc(100vh - 48px)); padding: 34px 20px 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 16px 44px rgba(23,26,27,.08); }
+.public-capture > h1 { margin: 0 0 24px; font-size: 27px; }
+.public-capture-mark { position: relative; width: 56px; height: 44px; margin-bottom: 22px; border: 3px solid var(--text); border-radius: 7px; }
+.public-capture-mark::before, .public-capture-mark::after, .public-capture-mark span { content: ""; position: absolute; width: 12px; height: 12px; border: 3px solid var(--text); }
+.public-capture-mark::before { left: 6px; top: 6px; }
+.public-capture-mark::after { right: 6px; top: 6px; }
+.public-capture-mark span { left: 20px; bottom: 5px; border-color: var(--accent); }
+.public-status { min-height: 300px; display: grid; place-content: center; color: var(--dim); text-align: center; }
+.public-task > p { margin: 4px 0 20px; color: var(--dim); font-size: 13px; line-height: 1.65; }
+.public-task .outline-button { margin-top: 8px; }
+.public-error, .public-success { min-height: 320px; display: grid; align-content: center; justify-items: center; text-align: center; }
+.public-error strong, .public-success strong { font-size: 18px; }
+.public-error p, .public-success p { max-width: 330px; margin: 8px 0 20px; color: var(--dim); font-size: 13px; line-height: 1.65; }
+.public-success > span { display: grid; place-items: center; width: 54px; height: 54px; margin-bottom: 17px; border-radius: 50%; background: var(--green); color: white; font-size: 28px; font-weight: 800; }
+.wechat-url-help { margin-bottom: 8px; padding: 12px; border-radius: 9px; background: var(--surface-2); }
+.wechat-url-help strong { display: block; margin-bottom: 3px; font-size: 13px; }
+.wechat-url-help p { margin: 0; color: var(--dim); font-size: 12px; line-height: 1.55; }
+.wechat-badge { margin-bottom: 10px; border-radius: 999px; padding: 5px 10px; background: color-mix(in srgb, var(--green) 14%, var(--surface)); color: var(--green); font-size: 12px; font-weight: 750; }
+.legacy-code-note { width: 100%; padding: 20px 16px; border-radius: 10px; background: var(--surface-2); text-align: left; }
+.legacy-code-note strong { font-size: 15px; }
+.legacy-code-note p { margin: 5px 0 0; color: var(--dim); font-size: 12px; line-height: 1.6; }
+
 @media (min-width: 700px) {
   .layout { padding-left: 28px; padding-right: 28px; }
   .section-heading { flex-wrap: nowrap; }

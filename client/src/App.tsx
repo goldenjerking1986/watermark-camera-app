@@ -49,15 +49,19 @@ function capturePayload(value: string): CaptureCodePayload | null {
   }
 }
 
-function assignmentQrValue(assignment: Pick<CaptureAssignment, "token" | "unit_name" | "location_text" | "photographer">) {
-  const payload: CaptureCodePayload = {
-    v: 1,
-    token: assignment.token,
+function assignmentQrValue(assignment: Pick<CaptureAssignment, "token" | "unit_name" | "location_text" | "photographer" | "public_entry_url">) {
+  const params = new URLSearchParams({
+    captureTask: assignment.token,
     unit: assignment.unit_name,
     location: assignment.location_text,
     photographer: assignment.photographer,
-  };
-  return `${CAPTURE_PREFIX}${JSON.stringify(payload)}`;
+  });
+  return `${assignment.public_entry_url}#${params.toString()}`;
+}
+
+function captureTokenFromHash() {
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  return new URLSearchParams(hash).get("captureTask")?.trim() ?? "";
 }
 
 function formatWatermarkDate(date: Date) {
@@ -146,13 +150,21 @@ export function App() {
   const [pairing, setPairing] = useState<{ token: string; expires_at: string } | null>(null);
   const [scannerStatus, setScannerStatus] = useState("");
   const [assignmentManagerOpen, setAssignmentManagerOpen] = useState(false);
-  const [assignmentForm, setAssignmentForm] = useState({ folderId: "", unitName: "", locationText: "", photographer: "" });
+  const [assignmentForm, setAssignmentForm] = useState({ folderId: "", unitName: "", locationText: "", photographer: "", publicEntryUrl: "" });
   const [currentAssignment, setCurrentAssignment] = useState<CaptureAssignment | null>(null);
+  const [publicCaptureToken] = useState(captureTokenFromHash);
+  const [publicUploadDone, setPublicUploadDone] = useState(false);
   const [captureScannerOpen, setCaptureScannerOpen] = useState(false);
   const [captureScannerStatus, setCaptureScannerStatus] = useState("");
   const [scannedAssignment, setScannedAssignment] = useState<ScannedAssignment | null>(null);
 
-  const sessionQuery = useQuery({ queryKey: ["session"], queryFn: () => api.getSession({}) });
+  const sessionQuery = useQuery({ queryKey: ["session"], queryFn: () => api.getSession({}), enabled: !publicCaptureToken });
+  const publicAssignmentQuery = useQuery({
+    queryKey: ["public-capture-assignment", publicCaptureToken],
+    queryFn: () => api.inspectCaptureAssignment({ token: publicCaptureToken }),
+    enabled: publicCaptureToken.length >= 30,
+    retry: false,
+  });
   const foldersQuery = useQuery({
     queryKey: ["folders"],
     queryFn: () => api.listFolders({}),
@@ -234,6 +246,7 @@ export function App() {
       unitName: assignmentForm.unitName,
       locationText: assignmentForm.locationText,
       photographer: assignmentForm.photographer,
+      publicEntryUrl: assignmentForm.publicEntryUrl,
     }),
     onSuccess: async (created) => {
       setCurrentAssignment(created);
@@ -264,16 +277,17 @@ export function App() {
 
   const uploadAssignmentPhoto = useMutation({
     mutationFn: async (file: File) => {
-      if (!scannedAssignment) throw new Error("请先扫描拍摄二维码");
+      const activeAssignment = publicAssignmentQuery.data ?? scannedAssignment;
+      if (!activeAssignment) throw new Error("请先打开有效的拍摄二维码");
       const takenAt = new Date();
       const stamped = await stampPhoto(file, [
-        `单位：${scannedAssignment.unit_name}`,
-        `地点：${scannedAssignment.location_text}`,
-        `拍摄人员：${scannedAssignment.photographer}`,
+        `单位：${activeAssignment.unit_name}`,
+        `地点：${activeAssignment.location_text}`,
+        `拍摄人员：${activeAssignment.photographer}`,
       ], takenAt);
       const encoded = await fileToBase64(stamped);
       return api.uploadCaptureAssignmentPhoto({
-        token: scannedAssignment.token,
+        token: activeAssignment.token,
         dataBase64: encoded.dataBase64,
         mimeType: "image/jpeg",
         filename: `QR_${formatWatermarkDate(takenAt).replace(/[-: ]/g, "")}.jpg`,
@@ -281,9 +295,12 @@ export function App() {
       });
     },
     onSuccess: async () => {
-      setNotice("扫码照片已上传到管理员文件夹");
-      setCaptureScannerOpen(false);
-      setScannedAssignment(null);
+      if (publicCaptureToken) setPublicUploadDone(true);
+      else {
+        setNotice("扫码照片已上传到管理员文件夹");
+        setCaptureScannerOpen(false);
+        setScannedAssignment(null);
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["folders"] }),
         queryClient.invalidateQueries({ queryKey: ["photos"] }),
@@ -367,7 +384,7 @@ export function App() {
   }, [assignmentManagerOpen, assignmentForm.folderId, folders]);
 
   useEffect(() => {
-    if (!currentAssignment || !assignmentQrCanvas.current) return;
+    if (!currentAssignment?.public_entry_url || !assignmentQrCanvas.current) return;
     void QRCode.toCanvas(assignmentQrCanvas.current, assignmentQrValue(currentAssignment), {
       width: 280,
       margin: 2,
@@ -502,7 +519,7 @@ export function App() {
   }
 
   function downloadAssignmentQr() {
-    if (!assignmentQrCanvas.current || !currentAssignment) return;
+    if (!assignmentQrCanvas.current || !currentAssignment?.public_entry_url) return;
     const link = document.createElement("a");
     link.download = `拍摄码-${currentAssignment.photographer}.png`;
     link.href = assignmentQrCanvas.current.toDataURL("image/png");
@@ -543,8 +560,45 @@ export function App() {
   return (
     <div className="app-shell">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
-      <main className="layout">
-        {sessionQuery.isPending ? (
+      <main className={`layout ${publicCaptureToken ? "public-layout" : ""}`}>
+        {publicCaptureToken ? (
+          <section className="public-capture" aria-labelledby="public-capture-heading">
+            <div className="public-capture-mark" aria-hidden="true"><span /></div>
+            <p className="modal-kicker">微信扫码拍摄</p>
+            <h1 id="public-capture-heading">现场照片上传</h1>
+            {publicAssignmentQuery.isPending ? (
+              <p className="public-status" aria-live="polite">正在读取拍摄任务…</p>
+            ) : publicAssignmentQuery.error || !publicAssignmentQuery.data ? (
+              <div className="public-error" role="alert">
+                <strong>这个拍摄码无法使用</strong>
+                <p>{publicAssignmentQuery.error instanceof Error ? publicAssignmentQuery.error.message : "二维码无效或已停用，请联系管理员重新生成。"}</p>
+              </div>
+            ) : publicUploadDone ? (
+              <div className="public-success" role="status">
+                <span aria-hidden="true">✓</span>
+                <strong>照片已上传</strong>
+                <p>已直接归档到管理员指定的文件夹。</p>
+                <button className="outline-button wide" onClick={() => setPublicUploadDone(false)}>继续拍一张</button>
+              </div>
+            ) : (
+              <div className="public-task">
+                <dl className="assignment-details">
+                  <div><dt>单位名称</dt><dd>{publicAssignmentQuery.data.unit_name}</dd></div>
+                  <div><dt>地点位置</dt><dd>{publicAssignmentQuery.data.location_text}</dd></div>
+                  <div><dt>拍摄人员</dt><dd>{publicAssignmentQuery.data.photographer}</dd></div>
+                </dl>
+                <p>拍摄时间和以上信息会自动写入水印，照片直接进入管理员文件夹。</p>
+                <button className="camera-button wide" onClick={() => assignmentCameraInput.current?.click()} disabled={uploadAssignmentPhoto.isPending}>
+                  {uploadAssignmentPhoto.isPending ? "正在加水印并上传…" : "打开相机拍照"}
+                </button>
+                <button className="outline-button wide" onClick={() => assignmentAlbumInput.current?.click()} disabled={uploadAssignmentPhoto.isPending}>从相册选择</button>
+                <input ref={assignmentCameraInput} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={pickAssignmentPhoto} aria-label="打开后置相机拍摄任务照片" />
+                <input ref={assignmentAlbumInput} className="hidden-input" type="file" accept="image/*" onChange={pickAssignmentPhoto} aria-label="从相册选择任务照片" />
+                {uploadAssignmentPhoto.error && <p className="inline-error" role="alert">{uploadAssignmentPhoto.error instanceof Error ? uploadAssignmentPhoto.error.message : "上传失败，请重试"}</p>}
+              </div>
+            )}
+          </section>
+        ) : sessionQuery.isPending ? (
           <section className="auth-gate" aria-live="polite">
             <span className="auth-mark" aria-hidden="true" />
             <h1>正在确认登录状态</h1>
@@ -680,20 +734,36 @@ export function App() {
             <h2>同事拍摄码</h2>
             {currentAssignment ? (
               <div className="assignment-qr-view">
-                <canvas ref={assignmentQrCanvas} aria-label={`包含${currentAssignment.unit_name}、${currentAssignment.location_text}和${currentAssignment.photographer}的拍摄二维码`} />
+                {currentAssignment.public_entry_url ? (
+                  <>
+                    <span className="wechat-badge">微信扫一扫可打开</span>
+                    <canvas ref={assignmentQrCanvas} aria-label={`微信可扫描的${currentAssignment.unit_name}、${currentAssignment.location_text}和${currentAssignment.photographer}拍摄二维码`} />
+                  </>
+                ) : (
+                  <div className="legacy-code-note">
+                    <strong>这是旧版应用内拍摄码</strong>
+                    <p>旧码不能由微信直接打开。请返回后填写公开访问地址，重新生成微信拍摄码。</p>
+                  </div>
+                )}
                 <dl className="assignment-details">
                   <div><dt>单位名称</dt><dd>{currentAssignment.unit_name}</dd></div>
                   <div><dt>地点位置</dt><dd>{currentAssignment.location_text}</dd></div>
                   <div><dt>拍摄人员</dt><dd>{currentAssignment.photographer}</dd></div>
                   <div><dt>归档文件夹</dt><dd>{currentAssignment.folder_name}</dd></div>
                 </dl>
-                <button className="solid-button wide" onClick={downloadAssignmentQr}>保存二维码图片</button>
-                <p className="assignment-help">把图片发给同事。同事登录 Muse 并打开本应用，点击“扫码拍摄”即可上传，照片会直接进入上述文件夹。</p>
+                {currentAssignment.public_entry_url && <button className="solid-button wide" onClick={downloadAssignmentQr}>保存微信二维码图片</button>}
+                <p className="assignment-help">{currentAssignment.public_entry_url ? "把二维码图片发给同事。对方用微信扫一扫打开后，可直接拍照或选图上传，照片会进入上述文件夹。" : "重新生成后，二维码会使用公开的 HTTPS 地址供微信打开。"}</p>
                 <button className="text-button" onClick={() => setCurrentAssignment(null)}>返回拍摄码列表</button>
               </div>
             ) : (
               <>
-                <form className="assignment-form" onSubmit={(event) => { event.preventDefault(); if (assignmentForm.folderId && assignmentForm.unitName.trim() && assignmentForm.locationText.trim() && assignmentForm.photographer.trim()) createAssignment.mutate(); }}>
+                <form className="assignment-form" onSubmit={(event) => { event.preventDefault(); if (assignmentForm.folderId && assignmentForm.unitName.trim() && assignmentForm.locationText.trim() && assignmentForm.photographer.trim() && assignmentForm.publicEntryUrl.trim()) createAssignment.mutate(); }}>
+                  <div className="wechat-url-help">
+                    <strong>先准备微信打开地址</strong>
+                    <p>在 Muse 中公开共享此应用后，复制得到的 HTTPS 访问地址并粘贴到下方。二维码会把同事直接带到拍照上传页。</p>
+                  </div>
+                  <label htmlFor="assignment-public-url">公开访问地址</label>
+                  <input id="assignment-public-url" type="url" inputMode="url" value={assignmentForm.publicEntryUrl} onChange={(event) => setAssignmentForm((current) => ({ ...current, publicEntryUrl: event.target.value }))} maxLength={500} placeholder="https://…" required />
                   <label htmlFor="assignment-folder">归档文件夹</label>
                   <select id="assignment-folder" value={assignmentForm.folderId} onChange={(event) => setAssignmentForm((current) => ({ ...current, folderId: event.target.value }))} required>
                     <option value="">选择文件夹</option>
@@ -705,8 +775,8 @@ export function App() {
                   <input id="assignment-location" value={assignmentForm.locationText} onChange={(event) => setAssignmentForm((current) => ({ ...current, locationText: event.target.value }))} maxLength={100} placeholder="如：东区三楼设备间" required />
                   <label htmlFor="assignment-photographer">拍摄人员</label>
                   <input id="assignment-photographer" value={assignmentForm.photographer} onChange={(event) => setAssignmentForm((current) => ({ ...current, photographer: event.target.value }))} maxLength={40} placeholder="姓名或工号" required />
-                  <button className="solid-button wide" type="submit" disabled={!assignmentForm.folderId || !assignmentForm.unitName.trim() || !assignmentForm.locationText.trim() || !assignmentForm.photographer.trim() || createAssignment.isPending}>
-                    {createAssignment.isPending ? "正在生成…" : "生成二维码图片"}
+                  <button className="solid-button wide" type="submit" disabled={!assignmentForm.folderId || !assignmentForm.unitName.trim() || !assignmentForm.locationText.trim() || !assignmentForm.photographer.trim() || !assignmentForm.publicEntryUrl.trim() || createAssignment.isPending}>
+                    {createAssignment.isPending ? "正在生成…" : "生成微信二维码图片"}
                   </button>
                 </form>
                 <div className="assignment-list">
@@ -718,7 +788,7 @@ export function App() {
                       <button className="assignment-open" onClick={() => setCurrentAssignment(assignment)}>
                         <strong>{assignment.photographer}</strong>
                         <span>{assignment.unit_name} · {assignment.location_text}</span>
-                        <small>{assignment.folder_name} · {assignment.active ? "可使用" : "已停用"}</small>
+                        <small>{assignment.folder_name} · {assignment.public_entry_url ? "微信可扫" : "应用内码"} · {assignment.active ? "可使用" : "已停用"}</small>
                       </button>
                       <button className="assignment-toggle" onClick={() => setAssignmentActive.mutate({ token: assignment.token, active: !assignment.active })} disabled={setAssignmentActive.isPending}>
                         {assignment.active ? "停用" : "启用"}
