@@ -15,6 +15,13 @@
       "when": 1790603326604,
       "tag": "0002_create_photo_folders",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790693984163,
+      "tag": "0003_add_authenticated_pairing_ownership",
+      "breakpoints": true
     }
   ]
 }
