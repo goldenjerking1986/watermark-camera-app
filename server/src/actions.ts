@@ -30,6 +30,7 @@ const assignmentShape = z.object({
   unit_name: z.string(),
   location_text: z.string(),
   photographer: z.string(),
+  public_entry_url: z.string(),
   active: z.boolean(),
   created_at: z.string(),
 });
@@ -297,6 +298,7 @@ export const Actions = {
           unitName: schema.captureAssignments.unitName,
           locationText: schema.captureAssignments.locationText,
           photographer: schema.captureAssignments.photographer,
+          publicEntryUrl: schema.captureAssignments.publicEntryUrl,
           active: schema.captureAssignments.active,
           createdAt: schema.captureAssignments.createdAt,
         })
@@ -311,6 +313,7 @@ export const Actions = {
         unit_name: row.unitName,
         location_text: row.locationText,
         photographer: row.photographer,
+        public_entry_url: row.publicEntryUrl,
         active: row.active,
         created_at: row.createdAt.toISOString(),
       })) };
@@ -323,6 +326,9 @@ export const Actions = {
       unitName: z.string().trim().min(1).max(80),
       locationText: z.string().trim().min(1).max(100),
       photographer: z.string().trim().min(1).max(40),
+      publicEntryUrl: z.string().trim().url().max(500)
+        .refine((value) => value.startsWith("https://"), "请输入 HTTPS 公开访问地址")
+        .refine((value) => !value.includes("#"), "公开访问地址不能包含 # 片段"),
     }),
     response: assignmentShape,
     async handler(ctx, args) {
@@ -340,6 +346,7 @@ export const Actions = {
         unitName: args.unitName.trim(),
         locationText: args.locationText.trim(),
         photographer: args.photographer.trim(),
+        publicEntryUrl: args.publicEntryUrl.trim(),
         createdAt,
       });
       ctx.invalidateQueries();
@@ -350,6 +357,7 @@ export const Actions = {
         unit_name: args.unitName.trim(),
         location_text: args.locationText.trim(),
         photographer: args.photographer.trim(),
+        public_entry_url: args.publicEntryUrl.trim(),
         active: true,
         created_at: createdAt.toISOString(),
       };
@@ -373,7 +381,6 @@ export const Actions = {
     request: z.object({ token: z.string().min(30).max(120) }),
     response: assignmentPublicShape,
     async handler(ctx, args) {
-      requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
       const rows = await db
         .select({
@@ -402,7 +409,6 @@ export const Actions = {
     }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
-      requireAccount(await getAccount(ctx));
       const db = ctx.db<typeof schema>();
       const assignments = await db
         .select({

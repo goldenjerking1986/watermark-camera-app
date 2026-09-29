@@ -68,6 +68,7 @@ export const captureAssignments = sqliteTable(
     unitName: text("unit_name").notNull(),
     locationText: text("location_text").notNull(),
     photographer: text("photographer").notNull(),
+    publicEntryUrl: text("public_entry_url").notNull().default(""),
     active: integer("active", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
