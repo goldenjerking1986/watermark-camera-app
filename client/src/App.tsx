@@ -7,6 +7,8 @@ import { api, type ApiResponse } from "./api";
 
 type Folder = ApiResponse<typeof api, "listFolders">["folders"][number];
 type Photo = ApiResponse<typeof api, "listPhotos">["photos"][number];
+type CaptureAssignment = ApiResponse<typeof api, "listCaptureAssignments">["assignments"][number];
+type ScannedAssignment = ApiResponse<typeof api, "inspectCaptureAssignment">;
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -18,10 +20,44 @@ function formatDate(value: string) {
 }
 
 const PAIRING_PREFIX = "watermark-photo-login:";
+const CAPTURE_PREFIX = "watermark-photo-task:";
+
+type CaptureCodePayload = {
+  v: 1;
+  token: string;
+  unit: string;
+  location: string;
+  photographer: string;
+};
 
 function pairingToken(value: string) {
   const trimmed = value.trim();
   return trimmed.startsWith(PAIRING_PREFIX) ? trimmed.slice(PAIRING_PREFIX.length) : "";
+}
+
+function capturePayload(value: string): CaptureCodePayload | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(CAPTURE_PREFIX)) return null;
+  try {
+    const parsed: unknown = JSON.parse(trimmed.slice(CAPTURE_PREFIX.length));
+    if (!parsed || typeof parsed !== "object") return null;
+    const candidate = parsed as Partial<CaptureCodePayload>;
+    if (candidate.v !== 1 || typeof candidate.token !== "string" || typeof candidate.unit !== "string" || typeof candidate.location !== "string" || typeof candidate.photographer !== "string") return null;
+    return { v: 1, token: candidate.token, unit: candidate.unit, location: candidate.location, photographer: candidate.photographer };
+  } catch {
+    return null;
+  }
+}
+
+function assignmentQrValue(assignment: Pick<CaptureAssignment, "token" | "unit_name" | "location_text" | "photographer">) {
+  const payload: CaptureCodePayload = {
+    v: 1,
+    token: assignment.token,
+    unit: assignment.unit_name,
+    location: assignment.location_text,
+    photographer: assignment.photographer,
+  };
+  return `${CAPTURE_PREFIX}${JSON.stringify(payload)}`;
 }
 
 function formatWatermarkDate(date: Date) {
@@ -38,7 +74,7 @@ function formatWatermarkDate(date: Date) {
   return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
 }
 
-async function stampPhoto(file: File, folderName: string, note: string, takenAt: Date): Promise<Blob> {
+async function stampPhoto(file: File, details: string[], takenAt: Date): Promise<Blob> {
   const sourceUrl = URL.createObjectURL(file);
   try {
     const image = new Image();
@@ -57,17 +93,22 @@ async function stampPhoto(file: File, folderName: string, note: string, takenAt:
     const padding = Math.max(22, Math.round(width * 0.025));
     const mainSize = Math.max(24, Math.round(width * 0.032));
     const subSize = Math.max(18, Math.round(width * 0.021));
-    const barHeight = note.trim() ? mainSize + subSize + padding * 2.3 : mainSize + padding * 2;
-    const y = height - barHeight;
-    ctx.fillStyle = "rgba(15, 18, 18, 0.72)";
+    const cleanDetails = details.map((item) => item.trim()).filter(Boolean);
+    const lineHeight = subSize * 1.35;
+    const barHeight = mainSize + cleanDetails.length * lineHeight + padding * 1.9;
+    const y = Math.max(0, height - barHeight);
+    ctx.fillStyle = "rgba(15, 18, 18, 0.76)";
     ctx.fillRect(0, y, width, barHeight);
     ctx.fillStyle = "#FFFFFF";
     ctx.font = `600 ${mainSize}px ui-monospace, SFMono-Regular, Consolas, monospace`;
     ctx.fillText(formatWatermarkDate(takenAt), padding, y + padding + mainSize * 0.82);
     ctx.font = `500 ${subSize}px system-ui, sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    const detail = note.trim() ? `${folderName} · ${note.trim()}` : folderName;
-    ctx.fillText(detail.slice(0, 80), padding, height - padding * 0.7);
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    cleanDetails.forEach((detail, index) => {
+      let visible = detail;
+      while (visible.length > 1 && ctx.measureText(`${visible}…`).width > width - padding * 2) visible = visible.slice(0, -1);
+      ctx.fillText(visible === detail ? visible : `${visible}…`, padding, y + padding + mainSize + lineHeight * (index + 0.82));
+    });
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
     if (!blob) throw new Error("照片生成失败");
     return blob;
@@ -85,6 +126,13 @@ export function App() {
   const scannerControls = useRef<IScannerControls | null>(null);
   const scannerHandled = useRef(false);
   const qrCanvas = useRef<HTMLCanvasElement>(null);
+  const assignmentQrCanvas = useRef<HTMLCanvasElement>(null);
+  const assignmentScannerVideo = useRef<HTMLVideoElement>(null);
+  const assignmentScannerControls = useRef<IScannerControls | null>(null);
+  const assignmentScannerHandled = useRef(false);
+  const assignmentImageInput = useRef<HTMLInputElement>(null);
+  const assignmentCameraInput = useRef<HTMLInputElement>(null);
+  const assignmentAlbumInput = useRef<HTMLInputElement>(null);
   const [activeFolderId, setActiveFolderId] = useState<number | undefined>();
   const [newFolderName, setNewFolderName] = useState("");
   const [note, setNote] = useState("");
@@ -97,6 +145,12 @@ export function App() {
   const [loginMode, setLoginMode] = useState<"code" | "scan">("code");
   const [pairing, setPairing] = useState<{ token: string; expires_at: string } | null>(null);
   const [scannerStatus, setScannerStatus] = useState("");
+  const [assignmentManagerOpen, setAssignmentManagerOpen] = useState(false);
+  const [assignmentForm, setAssignmentForm] = useState({ folderId: "", unitName: "", locationText: "", photographer: "" });
+  const [currentAssignment, setCurrentAssignment] = useState<CaptureAssignment | null>(null);
+  const [captureScannerOpen, setCaptureScannerOpen] = useState(false);
+  const [captureScannerStatus, setCaptureScannerStatus] = useState("");
+  const [scannedAssignment, setScannedAssignment] = useState<ScannedAssignment | null>(null);
 
   const sessionQuery = useQuery({ queryKey: ["session"], queryFn: () => api.getSession({}) });
   const foldersQuery = useQuery({
@@ -106,6 +160,12 @@ export function App() {
   });
   const folders = foldersQuery.data?.folders ?? [];
   const selectedFolder = folders.find((folder) => folder.id === activeFolderId);
+  const assignmentsQuery = useQuery({
+    queryKey: ["capture-assignments"],
+    queryFn: () => api.listCaptureAssignments({}),
+    enabled: sessionQuery.data?.authenticated === true,
+  });
+  const assignments = assignmentsQuery.data?.assignments ?? [];
 
   const photosQuery = useQuery({
     queryKey: ["photos", activeFolderId, search],
@@ -168,11 +228,74 @@ export function App() {
     },
   });
 
+  const createAssignment = useMutation({
+    mutationFn: () => api.createCaptureAssignment({
+      folderId: Number(assignmentForm.folderId),
+      unitName: assignmentForm.unitName,
+      locationText: assignmentForm.locationText,
+      photographer: assignmentForm.photographer,
+    }),
+    onSuccess: async (created) => {
+      setCurrentAssignment(created);
+      await queryClient.invalidateQueries({ queryKey: ["capture-assignments"] });
+    },
+  });
+
+  const setAssignmentActive = useMutation({
+    mutationFn: ({ token, active }: { token: string; active: boolean }) => api.setCaptureAssignmentActive({ token, active }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["capture-assignments"] });
+    },
+  });
+
+  const inspectAssignment = useMutation({
+    mutationFn: (token: string) => api.inspectCaptureAssignment({ token }),
+    onSuccess: (assignment) => {
+      assignmentScannerControls.current?.stop();
+      assignmentScannerControls.current = null;
+      setScannedAssignment(assignment);
+      setCaptureScannerStatus("");
+    },
+    onError: (reason) => {
+      assignmentScannerHandled.current = false;
+      setCaptureScannerStatus(reason instanceof Error ? reason.message : "拍摄码验证失败");
+    },
+  });
+
+  const uploadAssignmentPhoto = useMutation({
+    mutationFn: async (file: File) => {
+      if (!scannedAssignment) throw new Error("请先扫描拍摄二维码");
+      const takenAt = new Date();
+      const stamped = await stampPhoto(file, [
+        `单位：${scannedAssignment.unit_name}`,
+        `地点：${scannedAssignment.location_text}`,
+        `拍摄人员：${scannedAssignment.photographer}`,
+      ], takenAt);
+      const encoded = await fileToBase64(stamped);
+      return api.uploadCaptureAssignmentPhoto({
+        token: scannedAssignment.token,
+        dataBase64: encoded.dataBase64,
+        mimeType: "image/jpeg",
+        filename: `QR_${formatWatermarkDate(takenAt).replace(/[-: ]/g, "")}.jpg`,
+        capturedAt: takenAt.toISOString(),
+      });
+    },
+    onSuccess: async () => {
+      setNotice("扫码照片已上传到管理员文件夹");
+      setCaptureScannerOpen(false);
+      setScannedAssignment(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["folders"] }),
+        queryClient.invalidateQueries({ queryKey: ["photos"] }),
+      ]);
+    },
+  });
+
   const uploadPhoto = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedFolder) throw new Error("请先选择一个文件夹");
       const takenAt = new Date();
-      const stamped = await stampPhoto(file, selectedFolder.name, note, takenAt);
+      const stamped = await stampPhoto(file, [selectedFolder.name, note], takenAt);
       const encoded = await fileToBase64(stamped);
       return api.uploadPhoto({
         folderId: selectedFolder.id,
@@ -238,6 +361,55 @@ export function App() {
   }, [pairing]);
 
   useEffect(() => {
+    if (!assignmentManagerOpen || assignmentForm.folderId || folders.length === 0) return;
+    const firstFolder = folders[0];
+    if (firstFolder) setAssignmentForm((current) => ({ ...current, folderId: String(firstFolder.id) }));
+  }, [assignmentManagerOpen, assignmentForm.folderId, folders]);
+
+  useEffect(() => {
+    if (!currentAssignment || !assignmentQrCanvas.current) return;
+    void QRCode.toCanvas(assignmentQrCanvas.current, assignmentQrValue(currentAssignment), {
+      width: 280,
+      margin: 2,
+      errorCorrectionLevel: "M",
+      color: { dark: "#171a1b", light: "#ffffff" },
+    });
+  }, [currentAssignment]);
+
+  useEffect(() => {
+    if (!captureScannerOpen || scannedAssignment || !assignmentScannerVideo.current) return;
+    let cancelled = false;
+    assignmentScannerHandled.current = false;
+    setCaptureScannerStatus("正在启动相机…");
+    const reader = new BrowserQRCodeReader(undefined, { delayBetweenScanAttempts: 250 });
+    void reader.decodeFromVideoDevice(undefined, assignmentScannerVideo.current, (result) => {
+      if (!result || assignmentScannerHandled.current || cancelled) return;
+      const payload = capturePayload(result.getText());
+      if (!payload) {
+        setCaptureScannerStatus("这不是同事拍摄码，请对准正确二维码");
+        return;
+      }
+      assignmentScannerHandled.current = true;
+      assignmentScannerControls.current?.stop();
+      setCaptureScannerStatus("已识别，正在验证…");
+      inspectAssignment.mutate(payload.token);
+    }).then((controls) => {
+      if (cancelled) controls.stop();
+      else {
+        assignmentScannerControls.current = controls;
+        setCaptureScannerStatus("将同事拍摄码完整放入取景框");
+      }
+    }).catch(() => {
+      if (!cancelled) setCaptureScannerStatus("无法打开相机，可改为上传二维码图片");
+    });
+    return () => {
+      cancelled = true;
+      assignmentScannerControls.current?.stop();
+      assignmentScannerControls.current = null;
+    };
+  }, [captureScannerOpen, scannedAssignment]);
+
+  useEffect(() => {
     if (!loginOpen || loginMode !== "scan" || !scannerVideo.current) return;
     let cancelled = false;
     scannerHandled.current = false;
@@ -290,6 +462,53 @@ export function App() {
     }
   }
 
+  async function scanAssignmentImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    try {
+      setCaptureScannerStatus("正在识别拍摄码…");
+      const result = await new BrowserQRCodeReader().decodeFromImageUrl(url);
+      const payload = capturePayload(result.getText());
+      if (!payload) throw new Error("这不是本应用的同事拍摄码");
+      assignmentScannerHandled.current = true;
+      inspectAssignment.mutate(payload.token);
+    } catch (reason) {
+      assignmentScannerHandled.current = false;
+      setCaptureScannerStatus(reason instanceof Error ? reason.message : "没有识别到拍摄码");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function pickAssignmentPhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) uploadAssignmentPhoto.mutate(file);
+  }
+
+  function openCaptureScanner() {
+    setScannedAssignment(null);
+    setCaptureScannerStatus("");
+    setCaptureScannerOpen(true);
+  }
+
+  function closeCaptureScanner() {
+    assignmentScannerControls.current?.stop();
+    assignmentScannerControls.current = null;
+    setCaptureScannerOpen(false);
+    setScannedAssignment(null);
+  }
+
+  function downloadAssignmentQr() {
+    if (!assignmentQrCanvas.current || !currentAssignment) return;
+    const link = document.createElement("a");
+    link.download = `拍摄码-${currentAssignment.photographer}.png`;
+    link.href = assignmentQrCanvas.current.toDataURL("image/png");
+    link.click();
+  }
+
   function openLogin(mode: "code" | "scan") {
     setLoginMode(mode);
     setLoginOpen(true);
@@ -319,7 +538,7 @@ export function App() {
     uploadPhoto.mutate(file);
   }
 
-  const error = createFolder.error ?? uploadPhoto.error ?? deletePhoto.error ?? renameFolder.error ?? deleteFolder.error ?? disconnectPairing.error;
+  const error = createFolder.error ?? uploadPhoto.error ?? uploadAssignmentPhoto.error ?? createAssignment.error ?? setAssignmentActive.error ?? deletePhoto.error ?? renameFolder.error ?? deleteFolder.error ?? disconnectPairing.error;
 
   return (
     <div className="app-shell">
@@ -348,10 +567,14 @@ export function App() {
             </div>
             <div className="heading-actions">
               <span className="archive-count">{totalPhotos} 张归档</span>
-              <button className={`device-button ${sessionQuery.data?.linked ? "linked" : ""}`} onClick={() => openLogin(sessionQuery.data?.linked ? "scan" : "code")}>
-                <span className="device-dot" aria-hidden="true" />
-                {sessionQuery.data?.linked ? "已扫码登录" : "设备登录"}
-              </button>
+              <div className="heading-button-row">
+                <button className="scan-task-button" onClick={openCaptureScanner}>扫码拍摄</button>
+                <button className="code-manager-button" onClick={() => { setAssignmentManagerOpen(true); setCurrentAssignment(null); }}>同事拍摄码</button>
+                <button className={`device-button ${sessionQuery.data?.linked ? "linked" : ""}`} onClick={() => openLogin(sessionQuery.data?.linked ? "scan" : "code")}>
+                  <span className="device-dot" aria-hidden="true" />
+                  {sessionQuery.data?.linked ? "已扫码登录" : "设备登录"}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -439,7 +662,7 @@ export function App() {
               {photos.map((photo) => (
                 <button className="photo-card" key={photo.id} onClick={() => setPreview(photo)} aria-label={`查看照片 ${photo.note || photo.filename}`}>
                   <img src={photo.url} alt={photo.note ? `带水印的现场照片：${photo.note}` : "带时间水印的现场照片"} />
-                  <span className="photo-meta"><strong>{formatDate(photo.captured_at)}</strong><small>{photo.folder_name}{photo.note ? ` · ${photo.note}` : ""}</small></span>
+                  <span className="photo-meta"><strong>{formatDate(photo.captured_at)}</strong><small>{photo.folder_name}{photo.unit_name ? ` · ${photo.unit_name}` : photo.note ? ` · ${photo.note}` : ""}</small></span>
                 </button>
               ))}
             </div>
@@ -448,6 +671,103 @@ export function App() {
           </>
         )}
       </main>
+
+      {assignmentManagerOpen && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="同事拍摄码管理">
+          <div className="assignment-modal">
+            <button className="modal-close" onClick={() => { setAssignmentManagerOpen(false); setCurrentAssignment(null); }} aria-label="关闭同事拍摄码">×</button>
+            <p className="modal-kicker">扫码采集</p>
+            <h2>同事拍摄码</h2>
+            {currentAssignment ? (
+              <div className="assignment-qr-view">
+                <canvas ref={assignmentQrCanvas} aria-label={`包含${currentAssignment.unit_name}、${currentAssignment.location_text}和${currentAssignment.photographer}的拍摄二维码`} />
+                <dl className="assignment-details">
+                  <div><dt>单位名称</dt><dd>{currentAssignment.unit_name}</dd></div>
+                  <div><dt>地点位置</dt><dd>{currentAssignment.location_text}</dd></div>
+                  <div><dt>拍摄人员</dt><dd>{currentAssignment.photographer}</dd></div>
+                  <div><dt>归档文件夹</dt><dd>{currentAssignment.folder_name}</dd></div>
+                </dl>
+                <button className="solid-button wide" onClick={downloadAssignmentQr}>保存二维码图片</button>
+                <p className="assignment-help">把图片发给同事。同事登录 Muse 并打开本应用，点击“扫码拍摄”即可上传，照片会直接进入上述文件夹。</p>
+                <button className="text-button" onClick={() => setCurrentAssignment(null)}>返回拍摄码列表</button>
+              </div>
+            ) : (
+              <>
+                <form className="assignment-form" onSubmit={(event) => { event.preventDefault(); if (assignmentForm.folderId && assignmentForm.unitName.trim() && assignmentForm.locationText.trim() && assignmentForm.photographer.trim()) createAssignment.mutate(); }}>
+                  <label htmlFor="assignment-folder">归档文件夹</label>
+                  <select id="assignment-folder" value={assignmentForm.folderId} onChange={(event) => setAssignmentForm((current) => ({ ...current, folderId: event.target.value }))} required>
+                    <option value="">选择文件夹</option>
+                    {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                  </select>
+                  <label htmlFor="assignment-unit">单位名称</label>
+                  <input id="assignment-unit" value={assignmentForm.unitName} onChange={(event) => setAssignmentForm((current) => ({ ...current, unitName: event.target.value }))} maxLength={80} placeholder="如：河南省某某单位" required />
+                  <label htmlFor="assignment-location">地点位置</label>
+                  <input id="assignment-location" value={assignmentForm.locationText} onChange={(event) => setAssignmentForm((current) => ({ ...current, locationText: event.target.value }))} maxLength={100} placeholder="如：东区三楼设备间" required />
+                  <label htmlFor="assignment-photographer">拍摄人员</label>
+                  <input id="assignment-photographer" value={assignmentForm.photographer} onChange={(event) => setAssignmentForm((current) => ({ ...current, photographer: event.target.value }))} maxLength={40} placeholder="姓名或工号" required />
+                  <button className="solid-button wide" type="submit" disabled={!assignmentForm.folderId || !assignmentForm.unitName.trim() || !assignmentForm.locationText.trim() || !assignmentForm.photographer.trim() || createAssignment.isPending}>
+                    {createAssignment.isPending ? "正在生成…" : "生成二维码图片"}
+                  </button>
+                </form>
+                <div className="assignment-list">
+                  <div className="assignment-list-heading"><strong>已生成</strong><span>{assignments.length} 个</span></div>
+                  {assignments.length === 0 ? (
+                    <p className="assignment-empty">还没有拍摄码，填写上方信息生成第一个。</p>
+                  ) : assignments.map((assignment) => (
+                    <div className="assignment-row" key={assignment.token}>
+                      <button className="assignment-open" onClick={() => setCurrentAssignment(assignment)}>
+                        <strong>{assignment.photographer}</strong>
+                        <span>{assignment.unit_name} · {assignment.location_text}</span>
+                        <small>{assignment.folder_name} · {assignment.active ? "可使用" : "已停用"}</small>
+                      </button>
+                      <button className="assignment-toggle" onClick={() => setAssignmentActive.mutate({ token: assignment.token, active: !assignment.active })} disabled={setAssignmentActive.isPending}>
+                        {assignment.active ? "停用" : "启用"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {captureScannerOpen && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="扫描同事拍摄码">
+          <div className="capture-code-modal">
+            <button className="modal-close" onClick={closeCaptureScanner} aria-label="关闭扫码拍摄">×</button>
+            <p className="modal-kicker">同事拍摄</p>
+            <h2>{scannedAssignment ? "拍摄信息已载入" : "扫描拍摄码"}</h2>
+            {scannedAssignment ? (
+              <div className="capture-ready">
+                <dl className="assignment-details">
+                  <div><dt>单位名称</dt><dd>{scannedAssignment.unit_name}</dd></div>
+                  <div><dt>地点位置</dt><dd>{scannedAssignment.location_text}</dd></div>
+                  <div><dt>拍摄人员</dt><dd>{scannedAssignment.photographer}</dd></div>
+                </dl>
+                <p>照片将自动写入拍摄时间和以上信息，并直接归档到管理员指定的文件夹。</p>
+                <button className="camera-button wide" onClick={() => assignmentCameraInput.current?.click()} disabled={uploadAssignmentPhoto.isPending}>
+                  {uploadAssignmentPhoto.isPending ? "正在上传…" : "拍照并上传"}
+                </button>
+                <button className="outline-button wide" onClick={() => assignmentAlbumInput.current?.click()} disabled={uploadAssignmentPhoto.isPending}>从相册选择</button>
+                <input ref={assignmentCameraInput} className="hidden-input" type="file" accept="image/*" capture="environment" onChange={pickAssignmentPhoto} aria-label="为扫码任务调用后置相机拍照" />
+                <input ref={assignmentAlbumInput} className="hidden-input" type="file" accept="image/*" onChange={pickAssignmentPhoto} aria-label="为扫码任务从相册选择照片" />
+                {uploadAssignmentPhoto.error && <p className="inline-error">{uploadAssignmentPhoto.error instanceof Error ? uploadAssignmentPhoto.error.message : "上传失败，请重试"}</p>}
+              </div>
+            ) : (
+              <div className="scanner-panel">
+                <div className="scanner-frame">
+                  <video ref={assignmentScannerVideo} muted playsInline aria-label="同事拍摄码扫描取景器" />
+                  <span className="scan-corner s1" /><span className="scan-corner s2" /><span className="scan-corner s3" /><span className="scan-corner s4" />
+                </div>
+                <p className={inspectAssignment.error ? "scan-error" : ""}>{captureScannerStatus || "允许相机权限后对准同事拍摄码"}</p>
+                <button className="outline-button wide" onClick={() => assignmentImageInput.current?.click()} disabled={inspectAssignment.isPending}>从相册选择二维码</button>
+                <input ref={assignmentImageInput} className="hidden-input" type="file" accept="image/*" onChange={scanAssignmentImage} aria-label="从相册选择同事拍摄二维码图片" />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {loginOpen && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="设备扫码登录">
@@ -513,7 +833,16 @@ export function App() {
           <div className="preview-modal">
             <button className="modal-close" onClick={() => setPreview(null)} aria-label="关闭照片预览">×</button>
             <img src={preview.url} alt={preview.note || "带水印的现场照片"} />
-            <div className="preview-info"><strong>{preview.folder_name}</strong><span>{formatDate(preview.captured_at)}</span><p>{preview.note || "无备注"}</p></div>
+            <div className="preview-info">
+              <strong>{preview.folder_name}</strong><span>{formatDate(preview.captured_at)}</span>
+              {preview.unit_name ? (
+                <dl className="preview-capture-details">
+                  <div><dt>单位</dt><dd>{preview.unit_name}</dd></div>
+                  <div><dt>地点</dt><dd>{preview.location_text}</dd></div>
+                  <div><dt>拍摄人员</dt><dd>{preview.photographer}</dd></div>
+                </dl>
+              ) : <p>{preview.note || "无备注"}</p>}
+            </div>
             <a className="download-button" href={preview.url} download={preview.filename}>下载原图</a>
             <button className="danger-link" onClick={() => deletePhoto.mutate(preview.id)} disabled={deletePhoto.isPending}>{deletePhoto.isPending ? "正在删除…" : "删除这张照片"}</button>
           </div>
