@@ -29,6 +29,13 @@
       "when": 1790695300076,
       "tag": "0004_add_colleague_capture_codes",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790695787129,
+      "tag": "0005_add_wechat_public_entry_url",
+      "breakpoints": true
     }
   ]
 }
